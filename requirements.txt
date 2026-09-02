@@ -3,3 +3,4 @@ numpy>=1.26
 yfinance>=0.2.40
 streamlit>=1.36
 plotly>=5.22
+matplotlib>=3.8
