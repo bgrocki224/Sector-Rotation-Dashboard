@@ -53,10 +53,10 @@ CONFIG = {
     "max_weight": 0.35,             # cap on any single sector's portfolio weight
     "min_weight": 0.05,             # floor once a sector is included, else drop it
     "trailing_stop_pct": 0.12,      # exit early if -12% from the post-entry high
-    "overextension_pct": 0.30,      # trim if price is 20%+ above 50d MA (mean-reversion risk)
+    "overextension_pct": 0.25,      # trim if price is 20%+ above 50d MA (mean-reversion risk)
     "txn_cost_bps": 0,              # round-trip cost assumption per rebalance leg, in bps
     "risk_overlay_enabled": True,
-    "risk_off_equity_floor": 0.25,  # min total equity exposure retained even in risk-off
+    "risk_off_equity_floor": 0.55,  # min total equity exposure retained even in risk-off
     "factor_weights": {
         "momentum": 0.25,
         "trend": 0.15,
