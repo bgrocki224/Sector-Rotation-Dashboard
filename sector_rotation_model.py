@@ -52,11 +52,11 @@ CONFIG = {
     "hysteresis_rank": 6,           # a held sector isn't sold until it falls below this rank
     "max_weight": 0.35,             # cap on any single sector's portfolio weight
     "min_weight": 0.05,             # floor once a sector is included, else drop it
-    "trailing_stop_pct": 0.12,      # exit early if -12% from the post-entry high
-    "overextension_pct": 0.20,      # trim if price is 20%+ above 50d MA (mean-reversion risk)
-    "txn_cost_bps": 5,              # round-trip cost assumption per rebalance leg, in bps
+    "trailing_stop_pct": 0.15,      # exit early if -12% from the post-entry high
+    "overextension_pct": 0.30,      # trim if price is 20%+ above 50d MA (mean-reversion risk)
+    "txn_cost_bps": 0,              # round-trip cost assumption per rebalance leg, in bps
     "risk_overlay_enabled": True,
-    "risk_off_equity_floor": 0.50,  # min total equity exposure retained even in risk-off
+    "risk_off_equity_floor": 0.30,  # min total equity exposure retained even in risk-off
     "factor_weights": {
         "momentum": 0.25,
         "trend": 0.15,
