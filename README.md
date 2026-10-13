@@ -25,40 +25,39 @@ result.holdings_history.to_csv('holdings_history.csv')
 "
 ```
 This pulls live sector ETF prices via yfinance and backtests the momentum/trend/seasonality
-factors out of the box. Fundamentals, analyst sentiment, and market sentiment run
-in "neutral" mode (contribute 0 to the score) until you wire in a data feed — see below.
+factors, the macro regime factor (free FRED data, no key) and the RSI overbought overlay out of
+the box. Fundamentals and earnings revisions only exist as live snapshots, so they are neutral
+(contribute 0) in backtests — see below.
 
-## Wiring in the remaining factors
-As of the latest version, `extended_data_provider.py` (`YFinanceExtendedProvider`) wires
-fundamentals, analyst sentiment, and market sentiment to **free yfinance-based proxies**
-— no paid API key needed:
-- **Fundamentals** — ETF-level trailing P/E, cross-sector relative valuation.
-- **Analyst sentiment** — average analyst `recommendationMean` across each sector's top
-  holdings.
-- **Market sentiment** — 14-day RSI distance from neutral, as a positioning/stretch proxy.
+## Data sources for each factor
+- **Momentum, trend, seasonality, RSI overbought overlay** — prices via yfinance.
+- **Macro regime** — free FRED series fetched without an API key (`T10Y2Y`, `BAMLH0A0HYM2`,
+  `DTWEXBGS`, `DGS2`), lagged one day. Real history, so it is **backtested**. If FRED can't be
+  reached the factor silently goes neutral — the dashboard and alert script now print a visible
+  warning when that happens, since macro is the highest-weighted factor.
+- **Fundamentals and earnings revisions** — `extended_data_provider.py`
+  (`YFinanceExtendedProvider`) uses free yfinance proxies for **live scoring only**:
+  - *Fundamentals* — average trailing P/E of each sector's top holdings (5% weight).
+  - *Earnings revisions* — net analyst EPS-revision breadth (up vs. down revisions in the last
+    30 days) across top holdings, replacing the old static analyst-rating level (15% weight).
 
-These are proxies, not what a paid vendor (FMP, Zacks, Refinitiv) would give you — read
-the docstrings in `extended_data_provider.py` for exactly what's approximated and its
-limitations. Two things worth knowing:
-- **Lookahead bias:** fundamentals/analyst data only exist as today's snapshot (no free
-  historical time series), so they're only safe for **live/current** scoring, never for
-  historical backtesting — using them across historical rebalance dates would silently
-  feed today's data into decisions dated years ago. `streamlit_app.py` and
-  `check_rebalance_signal.py` are already wired correctly: the backtest always uses the
-  base `DataProvider` (momentum/trend/seasonality only); only the live "current
-  scores" panel/signal uses the extended provider.
-- **Rate limits:** the analyst-sentiment proxy fetches each sector's top ~8 holdings
-  individually (~90-110 extra calls total). Holdings composition is cached for 7 days by
-  default. If you hit Yahoo Finance rate limits (more likely on a shared host like
-  Streamlit Community Cloud than locally), turn off the "Use live fundamentals/analyst/
-  sentiment proxies" toggle in the dashboard sidebar, or pass `--no-extended` to
+These two are proxies, not what a paid vendor (FMP, I/B/E/S, FactSet) would give you. Notes:
+- **Lookahead bias:** both only exist as today's snapshot, so they're safe for live scoring
+  but never for backtests — the backtest always uses the base `DataProvider`, where they are
+  neutral. About 20% of the live composite therefore has no historical validation.
+- **Schema risk:** yfinance's `eps_revisions` table has changed between versions; the code
+  probes column names defensively and skips holdings it can't read, but verify it returns
+  non-NaN values for your sectors on first run.
+- **Rate limits:** the proxies fetch each sector's top ~8 holdings individually. Holdings are
+  cached for 7 days. If you hit Yahoo limits (likelier on Streamlit Cloud), turn off the
+  "Use live fundamentals/earnings-revision proxies" sidebar toggle, or pass `--no-extended` to
   `check_rebalance_signal.py`.
 
 To swap in a real paid vendor instead, subclass `DataProvider` (or
 `YFinanceExtendedProvider`) directly:
 ```python
 class MyProvider(DataProvider):
-    def get_analyst_sentiment(self, as_of):
+    def get_earnings_revisions(self, as_of):
         # return a pandas Series indexed by ticker (e.g. XLK, XLF, ...)
         # e.g. net EPS revision breadth from your vendor, sector-weighted
         ...
@@ -175,7 +174,7 @@ parts of the model are actually helping or hurting since a given backtest start 
   additive.
 - *Single-factor* — runs the model with ONLY one factor driving the ranking, to see its
   standalone performance.
-- Important: `fundamentals` / `analyst_sentiment` / `market_sentiment` only have today's
+- Important: `fundamentals` / `earnings_revisions` only have today's
   live snapshot (no free historical time series), so they're deliberately excluded from
   every backtest to avoid lookahead bias — meaning they're mathematically inert in this
   report by design. Expect their leave-one-out delta to be ~0 and their single-factor rows

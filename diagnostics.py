@@ -4,10 +4,10 @@ Diagnostics — factor attribution & diversification sensitivity
 Two questions this answers empirically instead of by guessing:
 
 1. FACTOR ATTRIBUTION: of the factors that actually participate in the backtest
-   (momentum, trend, seasonality -- fundamentals/analyst_sentiment/market_sentiment
-   are mathematically inert in every backtest by design, see sector_rotation_model.py's
-   lookahead-bias note), which ones have been helping vs. hurting since the backtest
-   start date?
+   (momentum, trend, seasonality, macro_regime and the RSI overbought overlay --
+   fundamentals/earnings_revisions are mathematically inert in every backtest by design,
+   since they only have a live snapshot; see extended_data_provider.py's lookahead-bias
+   note), which ones have been helping vs. hurting since the backtest start date?
 
    Two complementary views:
    - LEAVE-ONE-OUT: run the full model with one factor's weight zeroed out (others
@@ -48,12 +48,29 @@ from sector_rotation_model import RotationBacktester, DataProvider
 
 def _run_variant(provider: DataProvider, cfg: dict) -> dict:
     """Runs one backtest variant and extracts a compact stats row, including average
-    monthly turnover (not part of the core stats dict) as an extra diagnostic."""
+    monthly turnover and a portfolio-diversity check (not part of the core stats dict)
+    as extra diagnostics."""
     bt = RotationBacktester(provider, cfg)
     result = bt.run()
     row = dict(result.stats)
     row["avg_monthly_turnover"] = float(result.turnover.mean()) if len(result.turnover) else np.nan
     row["n_rebalances"] = len(result.turnover)
+
+    # Diagnostic: how many DISTINCT sector selections occurred across the whole
+    # backtest. This catches degenerate/tied rankings -- e.g. a factor that's a
+    # constant 0 for every sector produces a tie every month, which resolves to the
+    # SAME fixed set of sectors every single rebalance (n_distinct_portfolios == 1).
+    # A CAGR that looks good under those conditions is a static accidental bet on
+    # whichever sectors won the tie-break, not a real signal -- this column makes
+    # that visible instead of letting a good-looking but fake number pass unnoticed.
+    sector_cols = [c for c in result.holdings_history.columns if c != "equity_exposure"]
+    if sector_cols and len(result.holdings_history):
+        held = result.holdings_history[sector_cols].fillna(0).gt(0)
+        held_sets = held.apply(lambda r: tuple(sorted(r[r].index)), axis=1)
+        row["n_distinct_portfolios"] = int(held_sets.nunique())
+    else:
+        row["n_distinct_portfolios"] = np.nan
+
     return row
 
 
@@ -79,6 +96,12 @@ def run_leave_one_out(provider: DataProvider, base_cfg: dict) -> pd.DataFrame:
             continue  # degenerate case: only one factor existed
         rows[f"without {factor}"] = _run_variant(provider, variant_cfg)
 
+    # The overbought overlay is not a weighted factor, so test it separately
+    if base_cfg.get("overbought_enabled", True):
+        variant_cfg = copy.deepcopy(base_cfg)
+        variant_cfg["overbought_enabled"] = False
+        rows["without overbought_overlay"] = _run_variant(provider, variant_cfg)
+
     df = pd.DataFrame(rows).T
     df["cagr_delta_if_removed"] = baseline["CAGR"] - df["CAGR"]
     df.loc["baseline (all factors)", "cagr_delta_if_removed"] = np.nan
@@ -87,22 +110,25 @@ def run_leave_one_out(provider: DataProvider, base_cfg: dict) -> pd.DataFrame:
 
 def run_single_factor(provider: DataProvider, base_cfg: dict) -> pd.DataFrame:
     """For each factor, runs the model with ONLY that factor driving the ranking
-    (weight 1.0, all others 0). Shows standalone performance -- useful alongside
+    (weight 1.0, all others 0, overbought overlay off). Shows standalone performance -- useful alongside
     leave-one-out because a factor can look weak in combination but still be a
     genuinely strong standalone signal (or vice versa: a weak standalone factor can
     still add diversification value in the blend).
 
-    CAVEAT: for fundamentals/analyst_sentiment/market_sentiment specifically (inert in
-    every backtest -- see module docstring), isolating them as the ONLY factor means
-    every sector ties at a score of 0. The resulting "CAGR" is whatever fixed portfolio
-    falls out of that tie -- NOT a real standalone signal for those three. Expect their
-    rows here to be identical to each other and not meaningfully interpretable; the
-    leave-one-out view already proves they contribute nothing either way.
+    CAVEAT: for fundamentals/earnings_revisions specifically (inert in every backtest --
+    see module docstring), isolating them as the ONLY factor means every sector ties at a
+    score of 0. The resulting "CAGR" is whatever fixed portfolio falls out of that tie --
+    NOT a real standalone signal. Expect their rows to be identical to each other, and the
+    n_distinct_portfolios column to read 1; the leave-one-out view already proves they
+    contribute nothing either way.
     """
     rows = {}
     for factor in base_cfg["factor_weights"]:
         variant_cfg = copy.deepcopy(base_cfg)
         variant_cfg["factor_weights"] = {f: (1.0 if f == factor else 0.0) for f in base_cfg["factor_weights"]}
+        # Isolate the factor: with the overbought overlay on, it would break the tie for
+        # inert factors and make them look like a real RSI-driven rotation.
+        variant_cfg["overbought_enabled"] = False
         rows[factor] = _run_variant(provider, variant_cfg)
     return pd.DataFrame(rows).T
 
@@ -142,12 +168,20 @@ def format_report(loo_df: pd.DataFrame, sf_df: pd.DataFrame, sweep_df: pd.DataFr
     lines.append("(positive cagr_delta_if_removed = factor is net ADDITIVE, keep it)")
     lines.append("(negative cagr_delta_if_removed = factor is a net DRAG, consider cutting)")
     lines.append("=" * 70)
-    lines.append(loo_df[["CAGR", "Sharpe", "MaxDrawdown", "cagr_delta_if_removed"]].to_string())
+    lines.append(loo_df[["CAGR", "Sharpe", "MaxDrawdown", "cagr_delta_if_removed", "n_distinct_portfolios"]].to_string())
     lines.append("")
     lines.append("=" * 70)
     lines.append("FACTOR ATTRIBUTION -- Single-Factor Standalone")
     lines.append("=" * 70)
-    lines.append(sf_df[["CAGR", "Sharpe", "MaxDrawdown"]].sort_values("CAGR", ascending=False).to_string())
+    sf_sorted = sf_df[["CAGR", "Sharpe", "MaxDrawdown", "n_distinct_portfolios"]].sort_values("CAGR", ascending=False)
+    degenerate = sf_sorted[sf_sorted["n_distinct_portfolios"] <= 1]
+    if not degenerate.empty:
+        lines.append(f"*** WARNING: {', '.join(degenerate.index)} held a single static portfolio the ***")
+        lines.append("*** entire backtest (n_distinct_portfolios=1) -- a tied/degenerate ranking,   ***")
+        lines.append("*** not a real signal. Their CAGR is an accidental static bet, not evidence   ***")
+        lines.append("*** those factors are working. Ignore these rows for weighting decisions.     ***")
+        lines.append("")
+    lines.append(sf_sorted.to_string())
     lines.append("")
     lines.append("=" * 70)
     lines.append("DIVERSIFICATION SENSITIVITY -- top_n x max_weight")
